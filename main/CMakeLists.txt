@@ -29,6 +29,8 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
+            "protocols/local_stream_server.cc"
+            "protocols/av_stream_muxer.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
@@ -110,6 +112,11 @@ elseif(CONFIG_BOARD_TYPE_DF_K10)
     set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 elseif(CONFIG_BOARD_TYPE_DF_S3_AI_CAM)
     set(BOARD_TYPE "df-s3-ai-cam")
+elseif(CONFIG_BOARD_TYPE_CAMERA_XIAOZHI)
+    set(BOARD_TYPE "camera-xiaozhi")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_ESP_BOX_3)
     set(BOARD_TYPE "esp-box-3")
     set(BUILTIN_TEXT_FONT font_noto_basic_20_4)
@@ -949,7 +956,8 @@ endif()
 
 # Include Esp32Camera if target is ESP32S3
 if(CONFIG_IDF_TARGET_ESP32S3)
-    list(APPEND SOURCES "boards/common/esp32_camera.cc")
+    list(APPEND SOURCES "boards/common/esp32_camera.cc"
+                        "boards/common/camera_stream.cc")
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
@@ -968,6 +976,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_pm
                         esp_psram
                         esp_netif
+                        esp_http_server
                         esp_driver_gpio
                         esp_driver_uart
                         esp_driver_spi

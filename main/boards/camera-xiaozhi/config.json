@@ -1,0 +1,13 @@
+{
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "camera-xiaozhi",
+            "sdkconfig_append": [
+                "CONFIG_BOARD_TYPE_CAMERA_XIAOZHI=y",
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_HTTPD_WS_SUPPORT=y"
+            ]
+        }
+    ]
+}
