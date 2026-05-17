@@ -962,4 +962,14 @@ menu "TAIJIPAI_S3_CONFIG"
         启动双声道
 endmenu
 
+menu "Open Source Audio"
+    config USE_OPEN_SOURCE_AUDIO
+        bool "Use open-source audio processing (libopus/speexdsp/libfvad)"
+        default n
+        help
+            Replace proprietary esp_audio_codec/esp_audio_effects/esp-sr with
+            open-source equivalents. Required for non-ESP32 platform porting.
+            Phase 1: Opus encoder/decoder via libopus.
+endmenu
+
 endmenu

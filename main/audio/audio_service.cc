@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include <freertos/idf_additions.h>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
     (esp_ae_rate_cvt_cfg_t)                                  \
@@ -159,11 +160,20 @@ void AudioService::Start() {
 #endif
 
     /* Start the opus codec task */
+    // libopus needs ~30KB stack vs ~10KB for proprietary codec; use SPIRAM to avoid pressure on internal RAM
+#if CONFIG_USE_OPEN_SOURCE_AUDIO
+    xTaskCreateWithCaps([](void* arg) {
+        AudioService* audio_service = (AudioService*)arg;
+        audio_service->OpusCodecTask();
+        vTaskDelete(NULL);
+    }, "opus_codec", 2048 * 24, this, 2, &opus_codec_task_handle_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
     xTaskCreate([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->OpusCodecTask();
         vTaskDelete(NULL);
     }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+#endif
 }
 
 void AudioService::Stop() {

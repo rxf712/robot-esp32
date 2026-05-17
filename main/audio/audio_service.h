@@ -12,11 +12,16 @@
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
 #include <model_path.h>
+#include "esp_audio_types.h"
+#ifdef CONFIG_USE_OPEN_SOURCE_AUDIO
+#include "codecs/open_resampler.h"
+#include "codecs/open_opus_codec.h"
+#else
+#include "esp_ae_rate_cvt.h"
 #include "esp_audio_enc.h"
 #include "esp_opus_enc.h"
 #include "esp_opus_dec.h"
-#include "esp_ae_rate_cvt.h"
-#include "esp_audio_types.h"
+#endif
 
 #include "audio_codec.h"
 #include "audio_processor.h"

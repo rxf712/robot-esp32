@@ -807,6 +807,12 @@ else()
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
+# Open source audio codecs (Phase 1: libopus encoder/decoder; Phase 2: speexdsp resampler)
+if(CONFIG_USE_OPEN_SOURCE_AUDIO)
+    list(APPEND SOURCES "audio/codecs/open_opus_codec.cc")
+    list(APPEND SOURCES "audio/codecs/open_resampler.cc")
+endif()
+
 # Select audio processor according to Kconfig
 if(CONFIG_USE_AUDIO_PROCESSOR)
     list(APPEND SOURCES "audio/processors/afe_audio_processor.cc")
@@ -992,6 +998,9 @@ idf_component_register(SRCS ${SOURCES}
                         bt
                         fatfs
                         ${MAIN_PRIV_REQUIRES_EXTRA}
+                        libopus
+                        libspeexdsp
+                        libfvad
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME

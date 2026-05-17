@@ -1,0 +1,9 @@
+[submodule "components/libopus/opus"]
+	path = components/libopus/opus
+	url = https://github.com/xiph/opus.git
+[submodule "components/libspeexdsp/speexdsp"]
+	path = components/libspeexdsp/speexdsp
+	url = https://github.com/xiph/speexdsp.git
+[submodule "components/libfvad/libfvad"]
+	path = components/libfvad/libfvad
+	url = https://github.com/dpirch/libfvad.git
