@@ -57,6 +57,20 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 }
 
+bool WebsocketProtocol::SendVideo(std::unique_ptr<VideoStreamPacket> packet) {
+    if (!websocket_ || !websocket_->IsConnected() || !packet) return false;
+
+    std::string buf;
+    buf.resize(sizeof(StreamFrame) + packet->jpeg_payload.size());
+    auto* hdr = reinterpret_cast<StreamFrame*>(buf.data());
+    hdr->type = 1;
+    hdr->flags = packet->keyframe ? 0x01 : 0x00;
+    hdr->payload_size = htons((uint16_t)packet->jpeg_payload.size());
+    hdr->timestamp_ms = htonl(packet->timestamp_ms);
+    memcpy(hdr->payload, packet->jpeg_payload.data(), packet->jpeg_payload.size());
+    return websocket_->Send(buf.data(), buf.size(), true);
+}
+
 bool WebsocketProtocol::SendText(const std::string& text) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
         return false;

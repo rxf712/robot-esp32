@@ -15,6 +15,7 @@
 #include "camera_stream.h"
 #include "local_stream_server.h"
 #include "av_stream_muxer.h"
+#include <wifi_manager.h>
 
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
@@ -80,6 +81,36 @@ private:
     CameraStream* camera_stream_ = nullptr;
     LocalStreamServer* local_stream_server_ = nullptr;
     AvStreamMuxer* av_muxer_ = nullptr;
+    int stream_state_listener_id_ = -1;
+    esp_timer_handle_t config_retry_timer_ = nullptr;
+
+    void ScheduleConfigRetry() {
+        CancelConfigRetry();
+        esp_timer_create_args_t args = {
+            .callback = [](void* arg) {
+                (void)arg;
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                    ESP_LOGI(TAG, "Config mode: retrying WiFi connection");
+                    WifiManager::GetInstance().StopConfigAp();
+                }
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "cfg_retry",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&args, &config_retry_timer_);
+        esp_timer_start_once(config_retry_timer_, 300 * 1000 * 1000ULL);  // 5 min: enough time to find and connect the AP
+    }
+
+    void CancelConfigRetry() {
+        if (config_retry_timer_) {
+            esp_timer_stop(config_retry_timer_);
+            esp_timer_delete(config_retry_timer_);
+            config_retry_timer_ = nullptr;
+        }
+    }
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -113,7 +144,12 @@ private:
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
-                EnterWifiConfigMode();
+                EnterWifiConfigModeWithStreamStop();
+                return;
+            }
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                CancelConfigRetry();
+                WifiManager::GetInstance().StopConfigAp();
                 return;
             }
             app.ToggleChatState();
@@ -138,7 +174,7 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            EnterWifiConfigMode();
+            EnterWifiConfigModeWithStreamStop();
         });
 
         volume_up_button_.OnClick([this]() {
@@ -240,9 +276,9 @@ private:
         config.pin_reset = CAMERA_PIN_RESET;
         config.xclk_freq_hz = XCLK_FREQ_HZ;
         config.pixel_format = PIXFORMAT_YUV422;
-        config.frame_size = FRAMESIZE_VGA;
+        config.frame_size = FRAMESIZE_QVGA;   // VGA causes PSRAM bus starvation with audio AEC
         config.jpeg_quality = 9;
-        config.fb_count = 1;
+        config.fb_count = 2;
         config.fb_location = CAMERA_FB_IN_PSRAM;
         config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
@@ -256,25 +292,63 @@ private:
             "**CAUTION** You must ask the user to confirm this action.",
             PropertyList(), [this](const PropertyList& properties) {
                 (void)properties;
-                EnterWifiConfigMode();
+                EnterWifiConfigModeWithStreamStop();
                 return true;
             });
     }
 
+    void StopStreaming() {
+        if (stream_state_listener_id_ >= 0) {
+            Application::GetInstance().RemoveStateChangeListener(stream_state_listener_id_);
+            stream_state_listener_id_ = -1;
+        }
+        if (camera_stream_) {
+            camera_stream_->Stop();
+            delete camera_stream_;
+            camera_stream_ = nullptr;
+        }
+        if (local_stream_server_) {
+            local_stream_server_->Stop();
+            delete local_stream_server_;
+            local_stream_server_ = nullptr;
+        }
+        if (av_muxer_) {
+            delete av_muxer_;
+            av_muxer_ = nullptr;
+        }
+    }
+
+    void StartWifiConfigMode() override {
+        StopStreaming();
+        ScheduleConfigRetry();
+        WifiBoard::StartWifiConfigMode();
+    }
+
+    void EnterWifiConfigModeWithStreamStop() {
+        StopStreaming();
+        EnterWifiConfigMode();
+    }
+
     void InitializeStreaming() {
         Settings settings("av_stream", false);
-        int mode = settings.GetInt("mode", 0);
+        int mode = settings.GetInt("mode", kAvStreamLocal);  // default: local stream on
         if (mode == kAvStreamOff) return;
 
         int fps     = settings.GetInt("fps", 5);
         int quality = settings.GetInt("quality", 65);
+        // Cap fps: cam_capture + open_afe_proc share the 80MHz PSRAM bus;
+        // above 5fps the audio task starves and triggers WDT on CPU0.
+        if (fps > 5) {
+            ESP_LOGW(TAG, "fps %d capped to 5 (PSRAM bus limit)", fps);
+            fps = 5;
+        }
 
         av_muxer_ = new AvStreamMuxer();
         av_muxer_->SetMode((AvStreamMode)mode);
 
         if (mode == kAvStreamLocal) {
             local_stream_server_ = new LocalStreamServer();
-            int port = settings.GetInt("port", 80);
+            int port = settings.GetInt("port", 8080); // avoid conflict with WiFi config AP (port 80)
             if (!local_stream_server_->Start(port)) {
                 ESP_LOGE(TAG, "Failed to start local stream server");
                 delete local_stream_server_;
@@ -282,6 +356,9 @@ private:
                 return;
             }
             av_muxer_->SetLocalServer(local_stream_server_);
+            local_stream_server_->SetMonitorCallback([](bool active) {
+                Application::GetInstance().GetAudioService().EnableWakeWordDetection(!active);
+            });
         }
 
         camera_stream_ = new CameraStream(fps, quality);
@@ -309,6 +386,31 @@ public:
     void StartNetwork() override {
         WifiBoard::StartNetwork();
         InitializeStreaming();
+        // Pause camera stream during voice conversation to free PSRAM bandwidth for audio.
+        // Also show the camera URL on screen whenever the network becomes ready,
+        // so the user always knows the current IP (it can change after reconnect).
+        stream_state_listener_id_ = Application::GetInstance().AddStateChangeListener(
+            [this](DeviceState old_state, DeviceState new_state) {
+                // Camera pause/resume
+                if (camera_stream_) {
+                    bool was_idle = (old_state == kDeviceStateIdle || old_state == kDeviceStateUnknown);
+                    bool now_idle = (new_state == kDeviceStateIdle);
+                    if (was_idle && !now_idle) {
+                        camera_stream_->Pause();
+                    } else if (now_idle && !was_idle) {
+                        camera_stream_->Resume();
+                    }
+                }
+                // Show camera URL when network is ready (activating→idle) or after
+                // reconnect (connecting→idle via short-circuit).  This lets the user
+                // know the current IP even when DHCP assigns a new address.
+                if (new_state == kDeviceStateIdle && local_stream_server_) {
+                    auto ip = WifiManager::GetInstance().GetIpAddress();
+                    if (!ip.empty()) {
+                        GetDisplay()->ShowNotification("CAM " + ip + ":8080", 5000);
+                    }
+                }
+            });
     }
 
     AudioCodec* GetAudioCodec() override {
