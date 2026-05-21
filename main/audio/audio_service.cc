@@ -23,18 +23,28 @@
         .self_delimited = false,                                                                          \
     }
 
+#if CONFIG_USE_OPEN_SOURCE_AUDIO
+#include "processors/open_afe_audio_processor.h"
+#if CONFIG_WAKE_WORD_BACKEND_EI
+#include "wake_words/ei_wake_word.h"
+#elif CONFIG_WAKE_WORD_BACKEND_MWW
+#include "wake_words/mww_wake_word.h"
+#else
+#include "wake_words/open_afe_wake_word.h"
+#endif
+#else
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
 #else
 #include "processors/no_audio_processor.h"
 #endif
-
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
 #include "wake_words/afe_wake_word.h"
 #include "wake_words/custom_wake_word.h"
 #else
 #include "wake_words/esp_wake_word.h"
 #endif
+#endif // CONFIG_USE_OPEN_SOURCE_AUDIO
 
 #define TAG "AudioService"
 
@@ -93,7 +103,9 @@ void AudioService::Initialize(AudioCodec* codec) {
         }
     }
 
-#if CONFIG_USE_AUDIO_PROCESSOR
+#if CONFIG_USE_OPEN_SOURCE_AUDIO
+    audio_processor_ = std::make_unique<OpenAfeAudioProcessor>();
+#elif CONFIG_USE_AUDIO_PROCESSOR
     audio_processor_ = std::make_unique<AfeAudioProcessor>();
 #else
     audio_processor_ = std::make_unique<NoAudioProcessor>();
@@ -352,6 +364,7 @@ void AudioService::OpusCodecTask() {
             audio_decode_queue_.pop_front();
             audio_queue_cv_.notify_all();
             lock.unlock();
+            taskYIELD(); // let IDLE1 reset task watchdog between frames
 
             auto task = std::make_unique<AudioTask>();
             task->type = kAudioTaskTypeDecodeToPlaybackQueue;
@@ -407,6 +420,7 @@ void AudioService::OpusCodecTask() {
             audio_encode_queue_.pop_front();
             audio_queue_cv_.notify_all();
             lock.unlock();
+            taskYIELD(); // let IDLE1 reset task watchdog between frames
 
             auto packet = std::make_unique<AudioStreamPacket>();
             packet->frame_duration = OPUS_FRAME_DURATION_MS;
@@ -613,6 +627,14 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     }
 }
 
+void AudioService::FreeAudioProcessorForConfigMode() {
+    if (audio_processor_initialized_) {
+        audio_processor_->Deinitialize();
+        audio_processor_initialized_ = false;
+        xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+    }
+}
+
 void AudioService::EnableAudioTesting(bool enable) {
     ESP_LOGI(TAG, "%s audio testing", enable ? "Enabling" : "Disabling");
     if (enable) {
@@ -710,7 +732,15 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
 
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_USE_OPEN_SOURCE_AUDIO
+#  if CONFIG_WAKE_WORD_BACKEND_EI
+    wake_word_ = std::make_unique<EiWakeWord>();
+#  elif CONFIG_WAKE_WORD_BACKEND_MWW
+    wake_word_ = std::make_unique<MwwWakeWord>();
+#  else
+    wake_word_ = std::make_unique<OpenAfeWakeWord>();
+#  endif
+#elif CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
     if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<CustomWakeWord>();
     } else if (esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL) != nullptr) {
@@ -736,7 +766,9 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
 }
 
 bool AudioService::IsAfeWakeWord() {
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_USE_OPEN_SOURCE_AUDIO
+    return false;
+#elif CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
     return wake_word_ != nullptr && dynamic_cast<AfeWakeWord*>(wake_word_.get()) != nullptr;
 #else
     return false;

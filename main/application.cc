@@ -914,7 +914,9 @@ void Application::HandleStateChangedEvent() {
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
-            audio_service_.EnableVoiceProcessing(false);
+            // Free audio processor task stack + AEC/NS/VAD state so httpd_start
+            // has enough contiguous SRAM to create its server task.
+            audio_service_.FreeAudioProcessorForConfigMode();
             audio_service_.EnableWakeWordDetection(false);
             break;
         default:

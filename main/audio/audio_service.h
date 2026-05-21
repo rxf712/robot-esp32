@@ -74,9 +74,9 @@
         .bitrate            = ESP_OPUS_BITRATE_AUTO,                                                              \
         .frame_duration     = (esp_opus_enc_frame_duration_t)AS_OPUS_GET_FRAME_DRU_ENUM(OPUS_FRAME_DURATION_MS),  \
         .application_mode   = ESP_OPUS_ENC_APPLICATION_AUDIO,                                                     \
-        .complexity         = 0,                                                                                  \
+        .complexity         = 5,                                                                                  \
         .enable_fec         = false,                                                                              \
-        .enable_dtx         = true,                                                                               \
+        .enable_dtx         = false,                                                                              \
         .enable_vbr         = true,                                                                               \
     }
 
@@ -127,6 +127,7 @@ public:
 
     void EnableWakeWordDetection(bool enable);
     void EnableVoiceProcessing(bool enable);
+    void FreeAudioProcessorForConfigMode();
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
 
