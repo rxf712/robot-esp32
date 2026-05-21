@@ -25,9 +25,7 @@ private:
     std::function<void(std::unique_ptr<VideoStreamPacket>)> on_frame_;
 
     uint8_t* jpeg_buf_ = nullptr;
-    uint8_t* rgb_buf_  = nullptr;   // pre-allocated: eliminates per-frame 900KB malloc/free
-    static constexpr size_t kJpegBufSize = 32 * 1024;
-    static constexpr size_t kRgbBufSize  = 320 * 240 * 3; // QVGA RGB888
+    static constexpr size_t kJpegBufSize = 64 * 1024;
 
     void Capture();
     static void TimerCallback(void* arg);
