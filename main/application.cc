@@ -857,6 +857,7 @@ void Application::HandleStateChangedEvent() {
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
+    board.OnDeviceStateChanged(new_state);
     
     switch (new_state) {
         case kDeviceStateUnknown:

@@ -311,6 +311,15 @@ public:
         InitializeStreaming();
     }
 
+    void OnDeviceStateChanged(DeviceState state) override {
+        if (!camera_stream_) return;
+        if (state == kDeviceStateIdle) {
+            camera_stream_->Resume();
+        } else if (state == kDeviceStateConnecting) {
+            camera_stream_->Pause();
+        }
+    }
+
     AudioCodec* GetAudioCodec() override {
         static CustomAudioCodec audio_codec(i2c_bus_, pca9557_);
         return &audio_codec;
