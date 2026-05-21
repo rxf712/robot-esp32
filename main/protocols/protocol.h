@@ -30,6 +30,27 @@ struct BinaryProtocol3 {
     uint8_t payload[];
 } __attribute__((packed));
 
+// 8-byte header for local/remote A/V streaming
+struct StreamFrame {
+    uint8_t  type;           // 0=audio Opus, 1=video JPEG
+    uint8_t  flags;          // 0x01=keyframe
+    uint16_t payload_size;   // big-endian, max 65535
+    uint32_t timestamp_ms;   // big-endian, from esp_timer_get_time()/1000
+    uint8_t  payload[];
+} __attribute__((packed));
+
+struct VideoStreamPacket {
+    uint32_t timestamp_ms = 0;
+    bool keyframe = true;
+    std::vector<uint8_t> jpeg_payload;
+};
+
+enum AvStreamMode {
+    kAvStreamOff    = 0,
+    kAvStreamLocal  = 1,
+    kAvStreamRemote = 2,
+};
+
 enum AbortReason {
     kAbortReasonNone,
     kAbortReasonWakeWordDetected

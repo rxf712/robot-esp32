@@ -11,24 +11,45 @@
 
 #define TAG "CameraStream"
 
+// Notification values for the capture task.
+static constexpr uint32_t kNotifyCapture = 1;
+static constexpr uint32_t kNotifyStop    = 0xDEADBEEF;
+
+// YUYV (YCbCr 4:2:2 interleaved) → RGB888, BT.601 fixed-point (<<10).
+// Output must be width*height*3 bytes.
+static void yuyv_to_rgb888_local(const uint8_t* yuyv, uint8_t* rgb, int width, int height) {
+    int n = width * height / 2;
+    for (int i = 0; i < n; i++) {
+        int y0 = yuyv[0], cb = yuyv[1] - 128;
+        int y1 = yuyv[2], cr = yuyv[3] - 128;
+        yuyv += 4;
+        int r = (1436 * cr) >> 10;
+        int g = (352 * cb + 731 * cr) >> 10;
+        int b = (1814 * cb) >> 10;
+        auto clamp = [](int v) -> uint8_t { return v<0?0:v>255?255:(uint8_t)v; };
+        rgb[0]=clamp(y0+r); rgb[1]=clamp(y0-g); rgb[2]=clamp(y0+b); rgb+=3;
+        rgb[0]=clamp(y1+r); rgb[1]=clamp(y1-g); rgb[2]=clamp(y1+b); rgb+=3;
+    }
+}
+
 CameraStream::CameraStream(int fps, int jpeg_quality)
     : fps_(fps), jpeg_quality_(jpeg_quality) {
     jpeg_buf_ = (uint8_t*)heap_caps_malloc(kJpegBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!jpeg_buf_) {
         ESP_LOGE(TAG, "Failed to allocate JPEG buffer");
     }
+    // Pre-allocate the RGB888 intermediate buffer once to avoid 900KB per-frame
+    // malloc/free which fragments PSRAM after hundreds of frames.
+    rgb_buf_ = (uint8_t*)heap_caps_malloc(kRgbBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!rgb_buf_) {
+        ESP_LOGE(TAG, "Failed to allocate RGB buffer");
+    }
 }
 
 CameraStream::~CameraStream() {
     Stop();
-    if (encode_buf_) {
-        heap_caps_free(encode_buf_);
-        encode_buf_ = nullptr;
-    }
-    if (jpeg_buf_) {
-        heap_caps_free(jpeg_buf_);
-        jpeg_buf_ = nullptr;
-    }
+    if (jpeg_buf_) { heap_caps_free(jpeg_buf_); jpeg_buf_ = nullptr; }
+    if (rgb_buf_)  { heap_caps_free(rgb_buf_);  rgb_buf_  = nullptr; }
 }
 
 void CameraStream::SetFrameCallback(std::function<void(std::unique_ptr<VideoStreamPacket>)> cb) {
@@ -36,7 +57,20 @@ void CameraStream::SetFrameCallback(std::function<void(std::unique_ptr<VideoStre
 }
 
 void CameraStream::Start() {
-    if (timer_ || !jpeg_buf_) return;
+    if (capture_task_ || !jpeg_buf_) return;
+
+    // Dedicated task: stb JPEG encoding for 640×480 YUYV needs ~8KB stack.
+    // esp_timer callback has only ~3.5KB — not enough for stb internals.
+    xTaskCreatePinnedToCore([](void* arg) {
+        auto* self = static_cast<CameraStream*>(arg);
+        while (true) {
+            uint32_t val = 0;
+            xTaskNotifyWait(0, 0xFFFFFFFF, &val, portMAX_DELAY);
+            if (val == kNotifyStop) break;
+            self->Capture();
+        }
+        vTaskDelete(NULL);
+    }, "cam_capture", 4096 * 3, this, 5, &capture_task_, 1);
 
     esp_timer_create_args_t args = {
         .callback = TimerCallback,
@@ -52,15 +86,41 @@ void CameraStream::Start() {
 }
 
 void CameraStream::Stop() {
-    if (!timer_) return;
-    esp_timer_stop(timer_);
-    esp_timer_delete(timer_);
-    timer_ = nullptr;
+    if (timer_) {
+        esp_timer_stop(timer_);
+        esp_timer_delete(timer_);
+        timer_ = nullptr;
+    }
+    if (capture_task_) {
+        xTaskNotify(capture_task_, kNotifyStop, eSetValueWithOverwrite);
+        // Give the task time to finish the current frame and exit cleanly.
+        vTaskDelay(pdMS_TO_TICKS(300));
+        capture_task_ = nullptr;
+    }
     ESP_LOGI(TAG, "Stopped");
 }
 
+void CameraStream::Pause() {
+    if (timer_) {
+        esp_timer_stop(timer_);
+        ESP_LOGD(TAG, "Paused");
+    }
+}
+
+void CameraStream::Resume() {
+    if (timer_ && capture_task_) {
+        uint64_t interval_us = 1000000ULL / fps_;
+        esp_timer_start_periodic(timer_, interval_us);
+        ESP_LOGD(TAG, "Resumed at %d fps", fps_);
+    }
+}
+
 void CameraStream::TimerCallback(void* arg) {
-    static_cast<CameraStream*>(arg)->Capture();
+    auto* self = static_cast<CameraStream*>(arg);
+    if (self->capture_task_) {
+        // eSetValueWithOverwrite: if previous frame not yet processed, drop it.
+        xTaskNotify(self->capture_task_, kNotifyCapture, eSetValueWithOverwrite);
+    }
 }
 
 void CameraStream::Capture() {
@@ -79,17 +139,25 @@ void CameraStream::Capture() {
 
     uint32_t timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
+    // For YUYV: pre-convert to RGB888 into the pre-allocated rgb_buf_ so that
+    // encode_with_stb receives RGB24 and skips its internal 900KB malloc.
     uint8_t* src = fb->buf;
     size_t src_len = fb->len;
     v4l2_pix_fmt_t fmt;
-    switch (fb->format) {
-        case PIXFORMAT_YUV422:    fmt = V4L2_PIX_FMT_YUYV;   break;
-        case PIXFORMAT_GRAYSCALE: fmt = V4L2_PIX_FMT_GREY;   break;
-        case PIXFORMAT_RGB565:    fmt = V4L2_PIX_FMT_RGB565; break;
-        default:
-            ESP_LOGE(TAG, "Unsupported pixel format: %d", fb->format);
-            esp_camera_fb_return(fb);
-            return;
+    if (fb->format == PIXFORMAT_YUV422 && rgb_buf_) {
+        yuyv_to_rgb888_local(fb->buf, rgb_buf_, fb->width, fb->height);
+        src     = rgb_buf_;
+        src_len = (size_t)fb->width * fb->height * 3;
+        fmt     = V4L2_PIX_FMT_RGB24;
+    } else {
+        switch (fb->format) {
+            case PIXFORMAT_GRAYSCALE: fmt = V4L2_PIX_FMT_GREY;   break;
+            case PIXFORMAT_RGB565:    fmt = V4L2_PIX_FMT_RGB565; break;
+            default:
+                ESP_LOGE(TAG, "Unsupported pixel format: %d", fb->format);
+                esp_camera_fb_return(fb);
+                return;
+        }
     }
 
     struct JpegCtx {
