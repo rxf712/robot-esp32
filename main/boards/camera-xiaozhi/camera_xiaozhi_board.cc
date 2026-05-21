@@ -263,8 +263,8 @@ private:
 
     void InitializeStreaming() {
         Settings settings("av_stream", false);
-        int mode = settings.GetInt("mode", 0);
-        if (mode == kAvStreamOff) return;
+        int mode = settings.GetInt("mode", kAvStreamLocal);
+        if (mode == kAvStreamOff) mode = kAvStreamLocal;
 
         int fps     = settings.GetInt("fps", 5);
         int quality = settings.GetInt("quality", 65);
