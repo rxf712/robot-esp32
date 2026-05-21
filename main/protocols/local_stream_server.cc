@@ -81,6 +81,7 @@ LocalStreamServer::~LocalStreamServer() {
 }
 
 bool LocalStreamServer::Start(int port) {
+    if (server_) return true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = port;
     config.max_open_sockets = 4;

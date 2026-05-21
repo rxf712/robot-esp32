@@ -80,6 +80,7 @@ private:
     CameraStream* camera_stream_ = nullptr;
     LocalStreamServer* local_stream_server_ = nullptr;
     AvStreamMuxer* av_muxer_ = nullptr;
+    int stream_port_ = 80;
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -274,8 +275,8 @@ private:
 
         if (mode == kAvStreamLocal) {
             local_stream_server_ = new LocalStreamServer();
-            int port = settings.GetInt("port", 80);
-            if (!local_stream_server_->Start(port)) {
+            stream_port_ = settings.GetInt("port", 80);
+            if (!local_stream_server_->Start(stream_port_)) {
                 ESP_LOGE(TAG, "Failed to start local stream server");
                 delete local_stream_server_;
                 local_stream_server_ = nullptr;
@@ -308,15 +309,22 @@ public:
 
     void StartNetwork() override {
         WifiBoard::StartNetwork();
-        InitializeStreaming();
     }
 
     void OnDeviceStateChanged(DeviceState state) override {
         if (!camera_stream_) return;
         if (state == kDeviceStateIdle) {
             camera_stream_->Resume();
-        } else if (state == kDeviceStateConnecting) {
+            if (local_stream_server_) {
+                local_stream_server_->Start(stream_port_);
+            }
+        } else if (state == kDeviceStateConnecting ||
+                   state == kDeviceStateListening ||
+                   state == kDeviceStateSpeaking) {
             camera_stream_->Pause();
+            if (local_stream_server_) {
+                local_stream_server_->Stop();
+            }
         }
     }
 
