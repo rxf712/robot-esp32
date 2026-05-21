@@ -217,7 +217,11 @@ void CustomWakeWord::StoreWakeWordData(const std::vector<int16_t>& data) {
 
 void CustomWakeWord::EncodeWakeWordData() {
     // libopus encode uses ~30KB stack vs ~10KB for proprietary codec
-    const size_t stack_size = 4096 * (CONFIG_USE_OPEN_SOURCE_AUDIO ? 12 : 7);
+#ifdef CONFIG_USE_OPEN_SOURCE_AUDIO
+    const size_t stack_size = 4096 * 12;
+#else
+    const size_t stack_size = 4096 * 7;
+#endif
     wake_word_opus_.clear();
     if (wake_word_encode_task_stack_ == nullptr) {
         wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
