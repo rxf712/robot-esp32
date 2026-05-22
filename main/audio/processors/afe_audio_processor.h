@@ -2,6 +2,7 @@
 #define AFE_AUDIO_PROCESSOR_H
 
 #include <esp_afe_sr_models.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/event_groups.h>
@@ -41,6 +42,8 @@ private:
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
     std::vector<int16_t> output_buffer_;
+    StackType_t* task_stack_ = nullptr;
+    StaticTask_t* task_buffer_ = nullptr;
 
     void AudioProcessorTask();
 };

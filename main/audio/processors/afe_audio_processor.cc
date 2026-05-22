@@ -66,12 +66,17 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
-    
-    xTaskCreate([](void* arg) {
-        auto this_ = (AfeAudioProcessor*)arg;
-        this_->AudioProcessorTask();
+
+    // Allocate task stack from PSRAM to avoid SRAM exhaustion causing silent task
+    // creation failure (xTaskCreate returns pdFAIL without check → nobody calls fetch).
+    const size_t kTaskStack = 4096;
+    task_stack_ = (StackType_t*)heap_caps_malloc(kTaskStack, MALLOC_CAP_SPIRAM);
+    task_buffer_ = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
+    assert(task_stack_ != nullptr && task_buffer_ != nullptr);
+    xTaskCreateStatic([](void* arg) {
+        static_cast<AfeAudioProcessor*>(arg)->AudioProcessorTask();
         vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, 3, NULL);
+    }, "audio_communication", kTaskStack, this, 3, task_stack_, task_buffer_);
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
@@ -79,6 +84,8 @@ AfeAudioProcessor::~AfeAudioProcessor() {
         afe_iface_->destroy(afe_data_);
     }
     vEventGroupDelete(event_group_);
+    if (task_stack_)  heap_caps_free(task_stack_);
+    if (task_buffer_) heap_caps_free(task_buffer_);
 }
 
 size_t AfeAudioProcessor::GetFeedSize() {
