@@ -81,7 +81,6 @@ private:
     CameraStream* camera_stream_ = nullptr;
     LocalStreamServer* local_stream_server_ = nullptr;
     AvStreamMuxer* av_muxer_ = nullptr;
-    int stream_state_listener_id_ = -1;
     esp_timer_handle_t config_retry_timer_ = nullptr;
 
     void ScheduleConfigRetry() {
@@ -144,7 +143,7 @@ private:
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
-                EnterWifiConfigModeWithStreamStop();
+                EnterWifiConfigMode();
                 return;
             }
             if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
@@ -174,7 +173,11 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            EnterWifiConfigModeWithStreamStop();
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                return;  // already in config mode, ignore
+            }
+            EnterWifiConfigMode();
         });
 
         volume_up_button_.OnClick([this]() {
@@ -292,16 +295,12 @@ private:
             "**CAUTION** You must ask the user to confirm this action.",
             PropertyList(), [this](const PropertyList& properties) {
                 (void)properties;
-                EnterWifiConfigModeWithStreamStop();
+                EnterWifiConfigMode();
                 return true;
             });
     }
 
     void StopStreaming() {
-        if (stream_state_listener_id_ >= 0) {
-            Application::GetInstance().RemoveStateChangeListener(stream_state_listener_id_);
-            stream_state_listener_id_ = -1;
-        }
         if (camera_stream_) {
             camera_stream_->Stop();
             delete camera_stream_;
@@ -316,17 +315,6 @@ private:
             delete av_muxer_;
             av_muxer_ = nullptr;
         }
-    }
-
-    void StartWifiConfigMode() override {
-        StopStreaming();
-        ScheduleConfigRetry();
-        WifiBoard::StartWifiConfigMode();
-    }
-
-    void EnterWifiConfigModeWithStreamStop() {
-        StopStreaming();
-        EnterWifiConfigMode();
     }
 
     void InitializeStreaming() {
@@ -386,31 +374,31 @@ public:
     void StartNetwork() override {
         WifiBoard::StartNetwork();
         InitializeStreaming();
-        // Pause camera stream during voice conversation to free PSRAM bandwidth for audio.
-        // Also show the camera URL on screen whenever the network becomes ready,
-        // so the user always knows the current IP (it can change after reconnect).
-        stream_state_listener_id_ = Application::GetInstance().AddStateChangeListener(
-            [this](DeviceState old_state, DeviceState new_state) {
-                // Camera pause/resume
-                if (camera_stream_) {
-                    bool was_idle = (old_state == kDeviceStateIdle || old_state == kDeviceStateUnknown);
-                    bool now_idle = (new_state == kDeviceStateIdle);
-                    if (was_idle && !now_idle) {
-                        camera_stream_->Pause();
-                    } else if (now_idle && !was_idle) {
-                        camera_stream_->Resume();
-                    }
-                }
-                // Show camera URL when network is ready (activating→idle) or after
-                // reconnect (connecting→idle via short-circuit).  This lets the user
-                // know the current IP even when DHCP assigns a new address.
-                if (new_state == kDeviceStateIdle && local_stream_server_) {
+    }
+
+    void OnDeviceStateChanged(DeviceState state) override {
+        switch (state) {
+            case kDeviceStateIdle:
+                if (camera_stream_) camera_stream_->Resume();
+                if (local_stream_server_) {
                     auto ip = WifiManager::GetInstance().GetIpAddress();
                     if (!ip.empty()) {
                         GetDisplay()->ShowNotification("CAM " + ip + ":8080", 5000);
                     }
                 }
-            });
+                break;
+            case kDeviceStateConnecting:
+            case kDeviceStateListening:
+            case kDeviceStateSpeaking:
+                if (camera_stream_) camera_stream_->Pause();
+                break;
+            case kDeviceStateWifiConfiguring:
+                StopStreaming();
+                ScheduleConfigRetry();
+                break;
+            default:
+                break;
+        }
     }
 
     AudioCodec* GetAudioCodec() override {
