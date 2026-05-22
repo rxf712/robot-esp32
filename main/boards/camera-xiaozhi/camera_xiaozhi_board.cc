@@ -331,7 +331,7 @@ private:
 
     void InitializeStreaming() {
         Settings settings("av_stream", false);
-        int mode = settings.GetInt("mode", kAvStreamLocal);  // default: local stream on
+        int mode = settings.GetInt("mode", kAvStreamOff);  // default: off; enable via NVS av_stream/mode=1
         if (mode == kAvStreamOff) return;
 
         int fps     = settings.GetInt("fps", 5);

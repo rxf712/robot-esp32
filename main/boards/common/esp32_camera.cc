@@ -234,7 +234,8 @@ std::string Esp32Camera::Explain(const std::string &question) {
     });
 
     auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(3);
+    auto http = network->CreateHttp();
+    http->SetTimeout(10000);
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
