@@ -14,6 +14,7 @@ set(SPEEXDSP_SOURCES
     ${SPEEX_DIR}/buffer.c
     ${SPEEX_DIR}/scal.c
     ${SPEEX_DIR}/jitter.c
+    "${CMAKE_CURRENT_SOURCE_DIR}/speex_pool.c"
 )
 
 idf_component_register(

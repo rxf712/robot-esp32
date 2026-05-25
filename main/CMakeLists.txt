@@ -807,23 +807,35 @@ else()
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
-# Open source audio codecs (Phase 1: libopus encoder/decoder; Phase 2: speexdsp resampler)
+# Open source audio codecs (libopus + speexdsp + libfvad)
 if(CONFIG_USE_OPEN_SOURCE_AUDIO)
-    list(APPEND SOURCES "audio/codecs/open_opus_codec.cc")
-    list(APPEND SOURCES "audio/codecs/open_resampler.cc")
-endif()
-
-# Select audio processor according to Kconfig
-if(CONFIG_USE_AUDIO_PROCESSOR)
-    list(APPEND SOURCES "audio/processors/afe_audio_processor.cc")
+    list(APPEND SOURCES
+        "audio/codecs/open_opus_codec.cc"
+        "audio/codecs/open_resampler.cc"
+        "audio/processors/open_afe_audio_processor.cc"
+        "audio/processors/open_aec.cc"
+        "audio/processors/open_ns.cc"
+        "audio/processors/open_vad.cc"
+    )
+    # Wake word backend: only one is compiled, selected by Kconfig choice
+    if(CONFIG_WAKE_WORD_BACKEND_MWW)
+        list(APPEND SOURCES "audio/wake_words/mww_wake_word.cc")
+    else()
+        list(APPEND SOURCES "audio/wake_words/open_afe_wake_word.cc")
+    endif()
 else()
-    list(APPEND SOURCES "audio/processors/no_audio_processor.cc")
-endif()
-if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
-    list(APPEND SOURCES "audio/wake_words/afe_wake_word.cc")
-    list(APPEND SOURCES "audio/wake_words/custom_wake_word.cc")
-else()
-    list(APPEND SOURCES "audio/wake_words/esp_wake_word.cc")
+    # Select audio processor according to Kconfig
+    if(CONFIG_USE_AUDIO_PROCESSOR)
+        list(APPEND SOURCES "audio/processors/afe_audio_processor.cc")
+    else()
+        list(APPEND SOURCES "audio/processors/no_audio_processor.cc")
+    endif()
+    if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
+        list(APPEND SOURCES "audio/wake_words/afe_wake_word.cc")
+        list(APPEND SOURCES "audio/wake_words/custom_wake_word.cc")
+    else()
+        list(APPEND SOURCES "audio/wake_words/esp_wake_word.cc")
+    endif()
 endif()
 
 # Auto Select Additional Sources

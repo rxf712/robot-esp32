@@ -17,14 +17,7 @@ static const char* TAG = "OpenAfeProc";
 OpenAfeAudioProcessor::OpenAfeAudioProcessor() = default;
 
 OpenAfeAudioProcessor::~OpenAfeAudioProcessor() {
-    {
-        std::lock_guard<std::mutex> lock(input_mutex_);
-        stopped_ = true;
-        running_ = false;
-    }
-    input_cv_.notify_all();
-    // Give the task a moment to exit (no join in FreeRTOS; task self-deletes)
-    vTaskDelay(pdMS_TO_TICKS(50));
+    Deinitialize();
 }
 
 void OpenAfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms,
@@ -32,27 +25,52 @@ void OpenAfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms,
     codec_        = codec;
     frame_samples_ = frame_duration_ms * 16000 / 1000;
 
-    if (codec_->input_reference()) {
-        aec_ = std::make_unique<OpenAec>(16000, 5, 5);  // 5ms/80-sample frame+filter: state ~20KB vs 10ms→40KB; fits 48KB pool
-        aec_mic_.resize(aec_->frame_size());
-        aec_ref_.resize(aec_->frame_size());
-        aec_out_.resize(aec_->frame_size());
-    }
+    // NOTE: Software AEC (OpenAec / Speex MDF) is intentionally disabled here.
+    //   - Speex MDF on ESP32-S3 cannot process a 10ms frame in real time
+    //     (3-5× the available window) → audio backlog accumulates.
+    //   - CONFIG_USE_SERVER_AEC is also not viable: the upstream xiaozhi
+    //     server (tenclass) rejects the `features.aec=true` hello field with
+    //     a goodbye, so the conversation can't even start.
+    //   - With aec_mode_=kAecOff, Application chooses kListeningModeAutoStop:
+    //     the device listens *after* TTS playback ends, so there is no echo
+    //     to cancel.  This sacrifices barge-in but keeps the audio pipeline
+    //     within the S3's real-time budget.
+    //
+    // When a faster AEC (Speex FIXED_POINT, WebRTC AEC3, or ESP-SR) lands,
+    // re-enable creation below and gate via Kconfig.
+    //
+    // The downstream code (line ~205) extracts the mic channel from 2-channel
+    // input when aec_ is null, so this is a clean fall-through.
     speex_pool_mark();  // mark pool before NS so Reset() can rollback and reuse same DRAM
-    ns_  = std::make_unique<OpenNS>(16000, 5, -15);  // 5ms→80samples; state ~14KB vs 10ms→29KB; reduces DRAM pool requirement
+    ns_  = std::make_unique<OpenNS>(16000, 5, -15);  // 5ms→80samples; state ~14KB
     vad_ = std::make_unique<OpenVad>(2, 16000);
     output_buf_.reserve(frame_samples_);
     input_buf_.reserve(frame_samples_ * 4);  // keep in SRAM; prevents PSRAM realloc under load
 
-    ESP_LOGI(TAG, "init: frame=%dms (%d samples) aec=%s pool=%u/%u sram_free=%u",
-             frame_duration_ms, frame_samples_, aec_ ? "yes" : "no",
+    const bool aec_ok = !aec_ || aec_->is_valid();
+    const bool ns_ok  = ns_->is_valid();
+    const bool vad_ok = vad_->is_valid();
+    ESP_LOGI(TAG, "init: frame=%dms (%d samples) aec=%s ns=%s vad=%s pool=%u/%u sram_free=%u",
+             frame_duration_ms, frame_samples_,
+             aec_ok ? (aec_ ? "yes" : "off") : "FAIL",
+             ns_ok ? "yes" : "FAIL", vad_ok ? "yes" : "FAIL",
              speex_pool_usage(), speex_pool_capacity(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    if (!aec_ok || !ns_ok || !vad_ok) {
+        ESP_LOGE(TAG, "audio processor init partial-fail; pipeline will degrade gracefully");
+    }
 
-    xTaskCreatePinnedToCore([](void* arg) {
+    static constexpr uint32_t kTaskStackWords = 4096 * 2;
+    static constexpr size_t kTaskStackBytes = kTaskStackWords * sizeof(StackType_t);
+    proc_task_stack_  = (StackType_t*)heap_caps_malloc(kTaskStackBytes, MALLOC_CAP_SPIRAM);
+    proc_task_buffer_ = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
+    assert(proc_task_stack_ && proc_task_buffer_);
+    task_exited_ = false;
+    xTaskCreateStaticPinnedToCore([](void* arg) {
         static_cast<OpenAfeAudioProcessor*>(arg)->ProcessingTask();
+        static_cast<OpenAfeAudioProcessor*>(arg)->task_exited_.store(true, std::memory_order_release);
         vTaskDelete(NULL);
-    }, "open_afe_proc", 4096 * 2, this, 6, NULL, 1);
+    }, "open_afe_proc", kTaskStackWords, this, 6, proc_task_stack_, proc_task_buffer_, 1);
 }
 
 void OpenAfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
@@ -120,7 +138,16 @@ void OpenAfeAudioProcessor::Deinitialize() {
         input_buf_.clear();
     }
     input_cv_.notify_all();
-    vTaskDelay(pdMS_TO_TICKS(100));  // wait for processing task to exit
+
+    // Wait up to 1s for the processing task to actually exit.  Polling avoids
+    // the race where vTaskDelay(100) elapses before the task observed `stopped_`.
+    constexpr int kMaxWaitMs = 1000;
+    int waited_ms = 0;
+    while (proc_task_stack_ && !task_exited_.load(std::memory_order_acquire) && waited_ms < kMaxWaitMs) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        waited_ms += 10;
+    }
+    const bool task_done = task_exited_.load(std::memory_order_acquire);
 
     // Destroy AEC/NS/VAD while pool memory is still valid, then roll back pool.
     aec_.reset();
@@ -137,6 +164,17 @@ void OpenAfeAudioProcessor::Deinitialize() {
 
     reset_pending_ = false;
     stopped_ = false;  // allow future re-initialization
+
+    // Only free task memory if we confirmed the task exited; otherwise leak to
+    // avoid use-after-free.  Returning before the free would also be fine, but
+    // we still want the buffers above released.
+    if (task_done) {
+        if (proc_task_stack_)  { heap_caps_free(proc_task_stack_);  proc_task_stack_  = nullptr; }
+        if (proc_task_buffer_) { heap_caps_free(proc_task_buffer_); proc_task_buffer_ = nullptr; }
+    } else if (proc_task_stack_) {
+        ESP_LOGE(TAG, "processing task did not exit within %dms; leaking %u-byte stack to avoid UAF",
+                 kMaxWaitMs, (unsigned)(4096 * 2 * sizeof(StackType_t)));
+    }
     ESP_LOGI(TAG, "deinit: sram_free=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
@@ -168,7 +206,7 @@ void OpenAfeAudioProcessor::ProcessingTask() {
         }
 
         // ── 1. AEC: de-interleave [mic,ref], cancel echo, output mono ──────
-        if (aec_) {
+        if (aec_ && aec_->is_valid()) {
             const int fs     = aec_->frame_size();
             const int stride = 2;
             std::vector<int16_t> mono;
@@ -185,7 +223,7 @@ void OpenAfeAudioProcessor::ProcessingTask() {
             }
             data = std::move(mono);
         } else if (codec_->input_reference()) {
-            // 2-channel but no AEC: extract mic channel
+            // 2-channel without working AEC: extract mic channel (no echo cancellation)
             std::vector<int16_t> mono(data.size() / 2);
             for (size_t j = 0; j < mono.size(); j++) mono[j] = data[j * 2];
             data = std::move(mono);
@@ -226,10 +264,10 @@ void OpenAfeAudioProcessor::ProcessingTask() {
             }
         }
 
-        // Yield 1ms so IDLE1 can run on CPU1 (resets task watchdog).
-        // 10ms caused the backlog to grow: WiFi preemptions on CPU0 made
-        // each NS frame take >10ms effective time; now on CPU1 those
-        // preemptions are gone and 1ms yield is enough for watchdog.
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // No explicit yield here: the cv::wait at the top of the loop will
+        // naturally block whenever input_buf_ is drained (~7ms between feeds),
+        // giving IDLE0 enough time to reset the task watchdog.  An explicit
+        // vTaskDelay here costs at least 1 tick (=10ms at 100Hz) which exceeds
+        // the 10ms feed cadence and causes input backlog.
     }
 }

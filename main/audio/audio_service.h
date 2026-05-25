@@ -74,7 +74,7 @@
         .bitrate            = ESP_OPUS_BITRATE_AUTO,                                                              \
         .frame_duration     = (esp_opus_enc_frame_duration_t)AS_OPUS_GET_FRAME_DRU_ENUM(OPUS_FRAME_DURATION_MS),  \
         .application_mode   = ESP_OPUS_ENC_APPLICATION_AUDIO,                                                     \
-        .complexity         = 5,                                                                                  \
+        .complexity         = 0,                                                                                  \
         .enable_fec         = false,                                                                              \
         .enable_dtx         = false,                                                                              \
         .enable_vbr         = true,                                                                               \

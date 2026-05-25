@@ -52,6 +52,10 @@ private:
     std::vector<int16_t> output_buf_;
     bool is_speaking_ = false;
     std::atomic<bool> reset_pending_{false};
+    std::atomic<bool> task_exited_{false};
+
+    StackType_t*  proc_task_stack_  = nullptr;
+    StaticTask_t* proc_task_buffer_ = nullptr;
 
     std::function<void(std::vector<int16_t>&& data)> output_callback_;
     std::function<void(bool speaking)> vad_state_change_callback_;

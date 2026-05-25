@@ -970,6 +970,35 @@ menu "Open Source Audio"
             Replace proprietary esp_audio_codec/esp_audio_effects/esp-sr with
             open-source equivalents. Required for non-ESP32 platform porting.
             Phase 1: Opus encoder/decoder via libopus.
+
+    choice WAKE_WORD_BACKEND
+        prompt "Wake word backend (open-source path)"
+        depends on USE_OPEN_SOURCE_AUDIO
+        default WAKE_WORD_BACKEND_VAD
+        help
+            Choose the wake-word detector used when CONFIG_USE_OPEN_SOURCE_AUDIO=y.
+
+        config WAKE_WORD_BACKEND_VAD
+            bool "VAD onset (interim)"
+            help
+                Any sustained speech triggers wake. Small footprint, but high
+                false-trigger rate. Acceptable for development; not for product.
+
+        config WAKE_WORD_BACKEND_MWW
+            bool "microWakeWord (.tflite)"
+            help
+                Use a microWakeWord model. Currently falls back to VAD until a
+                .tflite model is dropped into components/micro_wake_word/. The
+                wake phrase reported upstream comes from CONFIG_MWW_WAKE_WORD.
+    endchoice
+
+    config MWW_WAKE_WORD
+        string "microWakeWord phrase"
+        default "你好小智"
+        depends on WAKE_WORD_BACKEND_MWW
+        help
+            Phrase string reported when MwwWakeWord fires.  Cosmetic only until
+            the .tflite model is wired in.
 endmenu
 
 endmenu

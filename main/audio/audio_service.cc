@@ -25,9 +25,7 @@
 
 #if CONFIG_USE_OPEN_SOURCE_AUDIO
 #include "processors/open_afe_audio_processor.h"
-#if CONFIG_WAKE_WORD_BACKEND_EI
-#include "wake_words/ei_wake_word.h"
-#elif CONFIG_WAKE_WORD_BACKEND_MWW
+#if CONFIG_WAKE_WORD_BACKEND_MWW
 #include "wake_words/mww_wake_word.h"
 #else
 #include "wake_words/open_afe_wake_word.h"
@@ -364,7 +362,10 @@ void AudioService::OpusCodecTask() {
             audio_decode_queue_.pop_front();
             audio_queue_cv_.notify_all();
             lock.unlock();
-            taskYIELD(); // let IDLE1 reset task watchdog between frames
+            // vTaskDelay(1) sleeps 1 tick (~10ms at 100Hz) so IDLE1 actually runs.
+            // taskYIELD() only reschedules same-or-higher priority, leaving IDLE
+            // starved on a CPU dominated by this task.
+            vTaskDelay(1);
 
             auto task = std::make_unique<AudioTask>();
             task->type = kAudioTaskTypeDecodeToPlaybackQueue;
@@ -420,7 +421,6 @@ void AudioService::OpusCodecTask() {
             audio_encode_queue_.pop_front();
             audio_queue_cv_.notify_all();
             lock.unlock();
-            taskYIELD(); // let IDLE1 reset task watchdog between frames
 
             auto packet = std::make_unique<AudioStreamPacket>();
             packet->frame_duration = OPUS_FRAME_DURATION_MS;
@@ -522,7 +522,14 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
         timestamp_queue_.pop_front();
     }
 
-    audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
+    if (audio_encode_queue_.size() >= MAX_ENCODE_TASKS_IN_QUEUE) {
+        if (type == kAudioTaskTypeEncodeToSendQueue) {
+            audio_encode_queue_.pop_front();
+            ESP_LOGW(TAG, "encode queue full, dropping oldest realtime audio frame");
+        } else {
+            audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
+        }
+    }
     audio_encode_queue_.push_back(std::move(task));
     audio_queue_cv_.notify_all();
 }
@@ -733,9 +740,7 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
 
 #if CONFIG_USE_OPEN_SOURCE_AUDIO
-#  if CONFIG_WAKE_WORD_BACKEND_EI
-    wake_word_ = std::make_unique<EiWakeWord>();
-#  elif CONFIG_WAKE_WORD_BACKEND_MWW
+#  if CONFIG_WAKE_WORD_BACKEND_MWW
     wake_word_ = std::make_unique<MwwWakeWord>();
 #  else
     wake_word_ = std::make_unique<OpenAfeWakeWord>();
